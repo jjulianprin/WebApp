@@ -1,0 +1,61 @@
+---
+# This Playbook Should be run with the next line
+# ansible-playbook WebServerPlaybook.yml -u ec2-user
+#
+- hosts: WebAppServers
+  become: true
+  tasks:
+  - name: Uses yum to update all the packages and repositories
+    yum:
+      name: '*'
+      state: present
+  - name: Installs some other packages
+    yum:
+      name:
+        - git
+        - mysql
+        - python36
+        - mysql-devel
+        - python36-devel.x86_64
+        - gcc
+#        - python2-PyMySQL.noarch
+#        - python36-PyMySQL.noarch 
+      state: present
+  - name: Installing PyMySQL using PIP
+    pip:
+      executable: pip
+      name: PyMySQL==0.9.3
+  - name: Creates and elevates permissions to FlaskProject folder
+    file:
+      path: /home/ec2-user/project_repo/FlaskProject
+      state: directory
+      mode: 0777
+  - name: Cloning repo from Git
+    git:
+      dest: /home/ec2-user/project_repo/FlaskProject
+      repo: https://github.com/jjulianprin/FlaskProject.git
+  - name: Adding Ormuco's Key
+    shell: cat /home/ec2-user/project_repo/FlaskProject/ormuco_rsa.pub >> /home/ec2-user/.ssh/authorized_keys
+  - name: Creating usersnpets database
+    mysql_db:
+      encoding: utf8
+      login_host: dbserver.cmrj9j8ds9vf.us-west-2.rds.amazonaws.com
+      login_password: qa12pl09
+      login_port: 3306
+      login_user: admin
+      name: usersnpets1
+      state: present
+  - name: Creating the users table in MySQL Database
+    shell: mysql -h dbserver.cmrj9j8ds9vf.us-west-2.rds.amazonaws.com -P3306 -u admin -pqa12pl09 -e "CREATE TABLE usersnpets.users (name VARCHAR(50), color VARCHAR(30), pet VARCHAR(5), PRIMARY KEY (name));"
+    ignore_errors: yes
+ #Ignoring the last line just in case it is run a second time in the same server
+  - name: Initiating the python virtual environment
+    pip: 
+      chdir: /home/ec2-user/project_repo/FlaskProject
+      requirements: requirements.txt
+      virtualenv: venv
+      virtualenv_python: python3
+  - name: Doing Source to run the virtual environment
+    shell: (source venv/bin/activate && (nohup python3 src/App.py </dev/null>/dev/null 2>&1)) &
+    args:
+      chdir: /home/ec2-user/project_repo/FlaskProject

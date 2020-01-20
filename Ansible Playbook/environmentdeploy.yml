@@ -1,0 +1,323 @@
+#----------------------------------------------
+#----------------------------------------------
+- name: Ormuco Environment Deployment
+  hosts: localhost
+  connection: local
+#----- Setting up the global variables for ease
+  pre_tasks: 
+    - include_vars: variables.yml
+  tasks:
+#----------------------------------------------
+#---------------Creating VPC
+  - name: Creating VPC to Deploy the Architecture
+    ec2_vpc_net:
+      cidr_block: 192.169.0.0/16
+      dhcp_opts_id: dopt-b7c248cf
+      name: LAB-VPC-ANSIBLE
+      region: "{{awsregionvar}}"
+    register: vpcansible
+
+#----------------------------------------------------
+#---------------Creating Internet Gateway
+  - name: Creating and attaching the IGW to the recent created VPC
+    ec2_vpc_igw:
+      region: "{{awsregionvar}}"
+      vpc_id: "{{vpcansible.vpc.id}}"
+    register: igwansible
+
+#----------------------------------------------------
+#---------------Creating EC2 VPC Subnets
+  - name: Creating EC2 VPC Subnet in AZ-1
+    ec2_vpc_subnet:
+      az: us-west-2a
+      cidr: 192.169.0.0/24
+      map_public: yes
+      region: "{{awsregionvar}}"
+      vpc_id: "{{vpcansible.vpc.id}}"
+    register: subnetaz1
+#
+  - name: Creating EC2 VPC Subnet in AZ-2
+    ec2_vpc_subnet:
+      az: us-west-2b
+      cidr: 192.169.1.0/24
+      map_public: yes
+      region: "{{awsregionvar}}"
+      vpc_id: "{{vpcansible.vpc.id}}"
+    register: subnetaz2
+#
+  - name: Creating EC2 VPC Subnet in AZ-3
+    ec2_vpc_subnet:
+      az: us-west-2c
+      cidr: 192.169.2.0/24
+      map_public: yes
+      region: "{{awsregionvar}}"
+      vpc_id: "{{vpcansible.vpc.id}}"
+    register: subnetaz3
+
+#----------------------------------------------------
+#---------------Creating Network ACLs
+  - name: Creating NACL for all the subnets usage
+    ec2_vpc_nacl:
+      ingress:
+          - [100, 'all', 'allow', '0.0.0.0/0', null, null, null, null]
+      egress:
+          - [100, 'all', 'allow', '0.0.0.0/0', null, null, null, null]
+      name: NACL-Ansible
+      region: "{{awsregionvar}}"
+      subnets:
+        - "{{subnetaz1.subnet.id}}"
+        - "{{subnetaz2.subnet.id}}"
+        - "{{subnetaz3.subnet.id}}"
+      vpc_id: "{{vpcansible.vpc.id}}"
+
+#----------------------------------------------------
+#---------------Creating Routing Tables for Subnets
+  - name: Creating Routing Tables for Subnets
+    ec2_vpc_route_table:
+      region: "{{awsregionvar}}"
+      routes:
+        - dest: 0.0.0.0/0
+          gateway_id: "{{ igwansible.gateway_id }}"
+      subnets:
+        - "{{subnetaz1.subnet.id}}"
+        - "{{subnetaz2.subnet.id}}"
+        - "{{subnetaz3.subnet.id}}"
+#      tags:
+#        Name: RoutingTableAnsible
+      vpc_id: "{{vpcansible.vpc.id}}"
+
+#----------------------------------------------------
+#---------------Creating Security Groups
+  - name: Creating Security Group HTTP
+    ec2_group: 
+      description: Security Group for web server instances created from Ansible
+      name: WebServer-SG-Ansible
+      region: "{{awsregionvar}}"
+      rules:
+        - proto: tcp
+          ports:
+            - 22
+            - 3000
+          cidr_ip: 0.0.0.0/0
+          rule_desc: Permitting SSH and TCP 3000 from anywhere
+        - proto: icmp
+          from_port: -1
+          to_port:  -1
+          cidr_ip: 0.0.0.0/0
+          rule_desc: Permitting PING (ICMP)
+      vpc_id: "{{vpcansible.vpc.id}}"
+    register: WebserverSGAn
+#
+  - name: Creating Security Group DB
+    ec2_group:
+      description: Security Group for DataBase Server instance created from Ansible
+      name: Database-SG-Ansible
+      region: "{{awsregionvar}}"
+      rules:
+       - proto: tcp
+         from_port: 3306
+         to_port: 3306
+         group_id: "{{WebserverSGAn.group_id}}"
+         rule_desc: Permitting traffic to MYSQL server from the WebServer-SG-Ansible Security Group
+      vpc_id: "{{vpcansible.vpc.id}}"
+    register: DBServerSGAn
+#
+  - name: Creating Security Group Classic Load Balancer
+    ec2_group:
+      description: Security Group for Classic Load Balancer created from Ansible
+      name: LoadBalancer-SG-Ansible
+      region: "{{awsregionvar}}"
+      rules:
+        - proto: tcp
+          ports:
+          - 3000
+          cidr_ip: 0.0.0.0/0
+          rule_desc: Permitting TCP 3000 from anywhere
+        - proto: icmp
+          from_port: -1
+          to_port:  -1
+          cidr_ip: 0.0.0.0/0
+          rule_desc: Permitting PING (ICMP)
+      vpc_id: "{{vpcansible.vpc.id}}"
+    register: ELBSGAn
+
+#----------------------------------------------------
+#---------Creating Clasic Load Balancer
+  - name: Deploy the ELB(s)
+    ec2_elb_lb:
+      connection_draining_timeout: 150
+      cross_az_load_balancing: yes
+      health_check:
+          ping_protocol: https
+          ping_port: 3000
+          ping_path: "/"
+          response_timeout: 15
+          interval: 30
+          unhealthy_threshold: 3
+          healthy_threshold: 10
+      idle_timeout: 80
+      instance_ids:
+      listeners:
+        - protocol: tcp
+          load_balancer_port: 3000
+          instance_port: 3000
+      name: WebApp-CLB-Ansible
+      region: "{{awsregionvar}}"
+      scheme: internet-facing
+      security_group_ids: "{{ELBSGAn.group_id}}"
+      state: present
+      subnets:
+        - "{{subnetaz1.subnet.id}}"
+        - "{{subnetaz2.subnet.id}}"
+        - "{{subnetaz3.subnet.id}}"
+
+#----------------------------------------------------
+#---------Creating RDS Subnet Group
+  - name: Creating RDS Subnet Group
+    rds_subnet_group:
+      description: RDS Subnet Group Created from Ansible
+      name: Lab-VPC-Ansible
+      region: "{{awsregionvar}}"
+      state: present
+      subnets:
+        - "{{subnetaz1.subnet.id}}"
+        - "{{subnetaz2.subnet.id}}"
+        - "{{subnetaz3.subnet.id}}"
+    register: RDSSubnetAnsible
+
+#----------------------------------------------------
+#---------Creating RDS instance with mysql
+  - name: Creating RDS instance with MySQL DB
+    rds:
+      backup_retention: 0
+      command: create
+      db_engine: MySQL
+      db_name: usersnpets
+      engine_version: 5.7.22
+      instance_name: dbserver-ansible
+      instance_type: db.t2.micro
+      license_model: general-public-license
+      multi_zone: no
+      password: qa12pl09
+      publicly_accessible: no
+      region: "{{awsregionvar}}"
+      size: 20
+      subnet: "{{RDSSubnetAnsible.subnet_group.name}}"
+      upgrade: yes
+      username: admin
+      vpc_security_groups: "{{DBServerSGAn.group_id}}"
+      zone: us-west-2a
+
+#----------------------------------------------------
+#---------Getting the RDS endpoint
+  - name: Getting the RDS endpoint
+    rds_instance_facts:
+#    rds_instance_info :  This is the newest instruction but this has a bug and is not returning the RDS endpoint.
+      db_instance_identifier: dbserver-ansible
+      region: "{{awsregionvar}}"
+    register: RDSFacts
+#----------------------------------------------------
+#---------Deubugging function
+  - name: Deubugging function
+    debug:
+      var: RDSFacts
+#      msg: This is the output from the debugging line  {{RDSFacts.instances[0].endpoint.address}}
+#----------------------------------------------------
+#---------Updating the User Data using the new RDS endpoint
+  - name: Updating the User Data using the new RDS endpoint
+    replace:
+      path: /etc/ansible/UserDataScript.sh
+      regexp: "DatabaseEndpoint"
+      replace: "{{RDSFacts.instances[0].endpoint.address}}"
+    delegate_to: 127.0.0.1
+
+#----------------------------------------------------
+#---------Saving Locally the RDS endpoint
+#  - name: Saving Locally the RDS endpoint
+#    local_action: copy content={{ RDSFacts.instances[0].endpoint.address }} dest=/etc/ansible/RDSEndpoint.txt
+
+#----------------------------------------------------
+#---------Creating AutoScaling Lanch Configuration
+  - name: AutoScaling Launch Configuration
+    ec2_lc:
+      assign_public_ip: yes
+      image_id: ami-01460aa81365561fe
+      instance_type: t2.micro
+      key_name: WebServersKeyPair
+      name: WebApp-LC-PublicIP-Ansible
+      region: "{{awsregionvar}}"
+      security_groups: WebServer-SG-Ansible
+      state: present
+      user_data: "{{ lookup('file', 'UserDataScript.sh') }}"
+#      user_data_path: /etc/ansible/UserDataScript.sh 
+      volumes: 
+      - device_name: /dev/xvda
+        volume_size: 8 
+        device_type: gp2
+        delete_on_termination: true
+
+#----------------------------------------------------
+#---------Creating AutoScaling Group
+  - name: Auto Scaling Group Configuration
+    ec2_asg:
+      availability_zones: ['us-west-2a', 'us-west-2b', 'us-west-2c']
+      desired_capacity: 1 
+      health_check_type: EC2
+      launch_config_name: WebApp-LC-PublicIP-Ansible
+      load_balancers: WebApp-CLB-Ansible
+      max_size: 2
+      min_size: 1
+      name: WebApp-ASG-Ansible
+      region: "{{awsregionvar}}"
+      vpc_zone_identifier: [ "{{subnetaz1.subnet.id}}", "{{subnetaz2.subnet.id}}", "{{subnetaz3.subnet.id}}"]
+    register: ASGOutput
+
+#----------------------------------------------------
+#---------Getting Facts from ASGs
+  - name: Getting Facts from ASGs
+    ec2_asg_info :
+      name: WebApp-ASG-Ansible
+      region: "{{awsregionvar}}"
+    register: ASGFacts
+
+#----------------------------------------------------
+#---------Getting the Instance's facts
+  - name: Getting the Instance's facts
+    ec2_instance_facts:
+      instance_ids: "{{ASGFacts.results[0].instances[0].instance_id}}"
+      region: "{{awsregionvar}}"
+    register: InstFacts
+#
+# {{InstFacts.instances[0].network_interfaces[0].association.public_ip}} To get the instance Public IP Address in case you want to perform a deployment from a playbook
+
+#----------------------------------------------------
+#---------Show instance public IP Address to do SSH
+  - name: Show instance public IP Address to do SSH
+    debug:
+      msg: You can now do SSH to {{InstFacts.instances[0].network_interfaces[0].association.public_ip}} using the Key File 
+
+
+#----------------------------------------------------
+#---------Deubugging function
+#  - name: Deubugging function 
+#    debug:
+#      var: RDSFacts
+#      msg: This is the output from the debugging line  {{RDSFacts.instances[0].endpoint.address}}
+
+
+
+#----------------------------------------------------
+#----------------------------------------------------
+#
+#  - name: Launching EC2 Instance(s)
+#    ec2: 
+#      assign_public_ip: yes
+#      group_id: sg-009e10d4d8a353cbd
+#      count: 1
+#      image: ami-01460aa81365561fe
+#      instance_type: t2.micro
+#      key_name: WebServersKeyPair
+#      region: us-west-2
+#      vpc_subnet_id: subnet-0fad325612cf81c71
+#      wait: yes
+#
